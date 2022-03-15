@@ -2,6 +2,7 @@ package me.steven.indrev.networks.item
 
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet
+import me.steven.indrev.IndustrialRevolution
 import me.steven.indrev.api.machines.Tier
 import me.steven.indrev.blocks.machine.pipes.ItemPipeBlock
 import me.steven.indrev.config.IRConfig
@@ -16,6 +17,7 @@ import net.minecraft.block.Block
 import net.minecraft.server.world.ServerWorld
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Direction
+import net.minecraft.world.gen.feature.TreeFeature
 import java.util.*
 import kotlin.collections.List
 import kotlin.collections.MutableMap
@@ -25,6 +27,9 @@ import kotlin.collections.component2
 import kotlin.collections.forEach
 import kotlin.collections.isNotEmpty
 import kotlin.collections.set
+import kotlin.collections.Map
+import kotlin.collections.LinkedHashSet
+import kotlin.math.ceil
 
 class ItemNetwork(
     world: ServerWorld,
@@ -42,34 +47,60 @@ class ItemNetwork(
         }.toLong()
 
     private val deques = Object2ObjectOpenHashMap<BlockPos, EnumMap<EndpointData.Mode, ReusableArrayDeque<Node>>>()
+    private var workQueue : LinkedHashSet<WorkQueueItem> = LinkedHashSet();
+    private var workQueueCountPerTik : Int = 0;
 
     override fun tick(world: ServerWorld) {
-        if (world.time % 20 != 0L) return
         val state = Type.ITEM.getNetworkState(world) as ItemNetworkState
-        if (containers.isEmpty()) return
-        else if (queue.isEmpty())
-            buildQueue()
-        if (queue.isNotEmpty()) {
-            containers.forEach { (pos, directions) ->
-                if (!world.isLoaded(pos)) return@forEach
-                val nodes = queue[pos] ?: return@forEach
-
-                directions.forEach inner@{ dir ->
-                    val data = state.getEndpointData(pos.offset(dir), dir.opposite) ?: return@inner
-                    val filterData = state.getFilterData(pos.offset(dir), dir.opposite)
-                    if (data.type == EndpointData.Type.INPUT) return@inner
-
-                    val deque = getQueue(pos, data, filterData, nodes)
-
-                    if (data.type == EndpointData.Type.OUTPUT)
-                        tickOutput(pos, dir, deque, state, data, filterData)
-                    else if (data.type == EndpointData.Type.RETRIEVER)
-                        tickRetriever(pos, dir, deque, state, data, filterData)
-
-                    deque.resetHead()
+        if (containers.isEmpty()) {
+            return
+        }
+        if (queue.isEmpty()) {
+            buildQueue();
+        }
+        // Build queue on first tik
+        if (world.time % 20 == 0L) {
+            containers.forEach inner@{ (pos, directions) ->
+                if (!world.isLoaded(pos)) {
+                    return
                 }
+                var nodes = queue[pos] ?: return
+                workQueue.add(WorkQueueItem(pos, directions, nodes))
+            }
+            // Divide by 19, first tik of the second go to building queue
+            workQueueCountPerTik = ceil(workQueue.size.toDouble() / 19).toInt();
+
+            IndustrialRevolution.LOGGER.warn("IndRev (%d, %d, %s): ItemNetwork Work Queue: %d (Per tick: %d)".format(world.time, this.hashCode(), this.pipes.first().toShortString(), workQueue.size, workQueueCountPerTik))
+            return;
+        }
+        var iterator = workQueue.iterator()
+        var counter = 0;
+        while (iterator.hasNext()) {
+           var item = iterator.next();
+
+           item.directions.forEach { dir ->
+               val nodes = queue[item.pos] ?: return@forEach
+               val data = state.getEndpointData(item.pos.offset(dir), dir.opposite) ?: return@forEach
+               val filterData = state.getFilterData(item.pos.offset(dir), dir.opposite)
+               if (data.type == EndpointData.Type.INPUT) return@forEach
+
+               val deque = getQueue(item.pos, data, filterData, nodes)
+
+               if (data.type == EndpointData.Type.OUTPUT)
+                   tickOutput(item.pos, dir, deque, state, data, filterData)
+               else if (data.type == EndpointData.Type.RETRIEVER)
+                   tickRetriever(item.pos, dir, deque, state, data, filterData)
+
+               deque.resetHead()
+            }
+
+            iterator.remove();
+            counter++;
+            if(workQueueCountPerTik <= counter && world.time % 20 != 19L) {
+                break;
             }
         }
+//        IndustrialRevolution.LOGGER.warn("IndRev (%d, %d, %s): ItemNetwork Work Queue Done: %d".format(world.time, this.hashCode(), this.pipes.first().toShortString(), counter))
     }
 
     private fun getQueue(pos: BlockPos, data: EndpointData, filter: ItemFilterData, nodes: List<Node>): ReusableArrayDeque<Node> {
@@ -143,5 +174,9 @@ class ItemNetwork(
         val cable = block as? ItemPipeBlock ?: return
         this.tier = cable.tier
         super.appendPipe(block, blockPos)
+    }
+
+    data class WorkQueueItem (val pos: BlockPos, val directions: EnumSet<Direction>, val nodes: MutableList<Node>) {
+
     }
 }
